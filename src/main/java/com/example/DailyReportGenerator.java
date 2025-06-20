@@ -2,16 +2,20 @@ package com.example;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.time.Instant;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -22,21 +26,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.eclipse.jgit.api.Git;
-import org.eclipse.jgit.api.errors.GitAPIException;
-import org.eclipse.jgit.diff.DiffEntry;
-import org.eclipse.jgit.diff.DiffFormatter;
-import org.eclipse.jgit.diff.EditList;
-import org.eclipse.jgit.diff.RawTextComparator;
-import org.eclipse.jgit.lib.ObjectId;
-import org.eclipse.jgit.lib.ObjectReader;
-import org.eclipse.jgit.lib.Repository;
-import org.eclipse.jgit.patch.FileHeader;
-import org.eclipse.jgit.revwalk.RevCommit;
-import org.eclipse.jgit.revwalk.RevWalk;
-import org.eclipse.jgit.treewalk.CanonicalTreeParser;
-import org.eclipse.jgit.util.io.DisabledOutputStream;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -45,29 +34,35 @@ public class DailyReportGenerator {
     
     private static final String CONFIG_FILE = "repositories.json";
     private static final String REPORT_DIR = "reports";
-    // Configure ObjectMapper with JavaTimeModule for Java 8 date/time support
     private static final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(30))
+            .build();
+    
     public enum RepositoryType {
-        GITHUB, GITLAB, BITBUCKET, SVN
+        GITHUB, GITLAB, BITBUCKET
     }
     
     public static class RepositoryConfig {
         public String name;
         public String url;
         public RepositoryType type;
-        public String username;
-        public String password; // or token
+        public String token; // API token/personal access token
+        public String owner; // Repository owner/organization
+        public String repo; // Repository name
         public boolean active = true;
         
         public RepositoryConfig() {}
         
-        public RepositoryConfig(String name, String url, RepositoryType type) {
+        public RepositoryConfig(String name, String url, RepositoryType type, String owner, String repo) {
             this.name = name;
             this.url = url;
             this.type = type;
+            this.owner = owner;
+            this.repo = repo;
         }
     }
     
@@ -114,7 +109,6 @@ public class DailyReportGenerator {
         try {
             DailyReportGenerator generator = new DailyReportGenerator();
             
-            // Check if config file exists, create sample if not
             if (!Files.exists(Paths.get(CONFIG_FILE))) {
                 generator.createSampleConfig();
                 System.out.println("Sample configuration created: " + CONFIG_FILE);
@@ -122,7 +116,6 @@ public class DailyReportGenerator {
                 return;
             }
             
-            // Generate daily report
             List<ReportData> reports = generator.generateDailyReports();
             generator.saveReports(reports);
             generator.printSummary(reports);
@@ -135,14 +128,15 @@ public class DailyReportGenerator {
     
     public void createSampleConfig() throws IOException {
         List<RepositoryConfig> sampleRepos = Arrays.asList(
-            new RepositoryConfig("MyProject", "https://github.com/user/myproject.git", RepositoryType.GITHUB),
-            new RepositoryConfig("WebApp", "https://gitlab.com/user/webapp.git", RepositoryType.GITLAB),
-            new RepositoryConfig("API", "https://bitbucket.org/user/api.git", RepositoryType.BITBUCKET)
+            new RepositoryConfig("MyProject", "https://github.com/user/myproject", RepositoryType.GITHUB, "user", "myproject"),
+            new RepositoryConfig("WebApp", "https://gitlab.com/user/webapp", RepositoryType.GITLAB, "user", "webapp"),
+            new RepositoryConfig("API", "https://bitbucket.org/user/api", RepositoryType.BITBUCKET, "user", "api")
         );
         
-        // Add credentials placeholders
-        sampleRepos.get(0).username = "your-github-username";
-        sampleRepos.get(0).password = "your-github-token";
+        // Add token placeholders
+        sampleRepos.get(0).token = "github_pat_your_token_here";
+        sampleRepos.get(1).token = "glpat-your_gitlab_token_here";
+        sampleRepos.get(2).token = "your_bitbucket_app_password_here";
         
         objectMapper.writerWithDefaultPrettyPrinter()
             .writeValue(new File(CONFIG_FILE), sampleRepos);
@@ -157,9 +151,10 @@ public class DailyReportGenerator {
             config.name = node.get("name").asText();
             config.url = node.get("url").asText();
             config.type = RepositoryType.valueOf(node.get("type").asText().toUpperCase());
+            config.owner = node.get("owner").asText();
+            config.repo = node.get("repo").asText();
             
-            if (node.has("username")) config.username = node.get("username").asText();
-            if (node.has("password")) config.password = node.get("password").asText();
+            if (node.has("token")) config.token = node.get("token").asText();
             if (node.has("active")) config.active = node.get("active").asBoolean();
             
             if (config.active) {
@@ -177,7 +172,7 @@ public class DailyReportGenerator {
         ExecutorService executor = Executors.newFixedThreadPool(5);
         List<Future<ReportData>> futures = new ArrayList<>();
         
-        System.out.println("Analyzing " + configs.size() + " repositories...");
+        System.out.println("Analyzing " + configs.size() + " repositories via API...");
         
         for (RepositoryConfig config : configs) {
             futures.add(executor.submit(() -> analyzeRepository(config)));
@@ -195,8 +190,6 @@ public class DailyReportGenerator {
         }
         
         executor.shutdown();
-        
-        // Ensure proper cleanup of executor
         try {
             if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
                 executor.shutdownNow();
@@ -219,12 +212,13 @@ public class DailyReportGenerator {
         try {
             switch (config.type) {
                 case GITHUB:
-                case GITLAB:
-                case BITBUCKET:
-                    analyzeGitRepository(config, report);
+                    analyzeGitHubRepository(config, report);
                     break;
-                case SVN:
-                    analyzeSvnRepository(config, report);
+                case GITLAB:
+                    analyzeGitLabRepository(config, report);
+                    break;
+                case BITBUCKET:
+                    analyzeBitbucketRepository(config, report);
                     break;
             }
         } catch (Exception e) {
@@ -236,155 +230,210 @@ public class DailyReportGenerator {
         return report;
     }
     
-    private void analyzeGitRepository(RepositoryConfig config, ReportData report) 
-            throws GitAPIException, IOException {
+    private void analyzeGitHubRepository(RepositoryConfig config, ReportData report) 
+            throws IOException, InterruptedException {
         
-        String repoName = config.name.replaceAll("[^a-zA-Z0-9]", "_");
-        Path localPath = Paths.get("./temp_repos/" + repoName);
-        Git git = null;
+        String today = LocalDate.now().toString();
+        String apiUrl = String.format("https://api.github.com/repos/%s/%s/commits", 
+                                    config.owner, config.repo);
         
-        try {
-            // Cleanup and clone
-            if (Files.exists(localPath)) {
-                deleteDirectory(localPath.toFile());
-            }
-            Files.createDirectories(localPath.getParent());
+        // Get commits for today
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(apiUrl + "?since=" + today + "T00:00:00Z&until=" + today + "T23:59:59Z"))
+                .timeout(Duration.ofSeconds(30))
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("User-Agent", "DailyReportGenerator");
+        
+        if (config.token != null) {
+            requestBuilder.header("Authorization", "Bearer " + config.token);
+        }
+        
+        HttpRequest request = requestBuilder.build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new IOException("GitHub API error: " + response.statusCode() + " - " + response.body());
+        }
+        
+        JsonNode commits = objectMapper.readTree(response.body());
+        
+        for (JsonNode commit : commits) {
+            String author = commit.get("commit").get("author").get("name").asText();
+            String sha = commit.get("sha").asText();
             
-            System.out.println("Cloning " + config.name + "...");
+            // Get detailed commit info with stats
+            String commitUrl = String.format("https://api.github.com/repos/%s/%s/commits/%s", 
+                                           config.owner, config.repo, sha);
             
-            if (config.username != null && config.password != null) {
-                git = Git.cloneRepository()
-                        .setURI(config.url)
-                        .setDirectory(localPath.toFile())
-                        .setCredentialsProvider(new org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider(
-                            config.username, config.password))
-                        .call();
-            } else {
-                git = Git.cloneRepository()
-                        .setURI(config.url)
-                        .setDirectory(localPath.toFile())
-                        .call();
-            }
+            HttpRequest commitRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(commitUrl))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Accept", "application/vnd.github.v3+json")
+                    .header("User-Agent", "DailyReportGenerator")
+                    .header("Authorization", config.token != null ? "Bearer " + config.token : "")
+                    .build();
             
-            LocalDate today = LocalDate.now();
+            HttpResponse<String> commitResponse = httpClient.send(commitRequest, HttpResponse.BodyHandlers.ofString());
             
-            try (Repository repository = git.getRepository()) {
-                Iterable<RevCommit> commits = git.log().call();
+            if (commitResponse.statusCode() == 200) {
+                JsonNode commitData = objectMapper.readTree(commitResponse.body());
+                JsonNode stats = commitData.get("stats");
+                JsonNode files = commitData.get("files");
                 
-                for (RevCommit commit : commits) {
-                    Instant commitInstant = Instant.ofEpochSecond(commit.getCommitTime());
-                    LocalDate commitDate = commitInstant.atZone(ZoneId.systemDefault()).toLocalDate();
-                    
-                    if (commitDate.equals(today)) {
-                        String author = commit.getAuthorIdent().getName();
-                        
-                        int[] changes = calculateChanges(repository, commit);
-                        Set<String> modifiedFiles = getModifiedFiles(repository, commit);
-                        
-                        report.contributions.computeIfAbsent(author, k -> new ContributionStats());
-                        ContributionStats stats = report.contributions.get(author);
-                        stats.added += changes[0];
-                        stats.deleted += changes[1];
-                        stats.commits += 1;
-                        stats.files.addAll(modifiedFiles);
+                ContributionStats contributionStats = report.contributions.computeIfAbsent(author, k -> new ContributionStats());
+                contributionStats.commits++;
+                
+                if (stats != null) {
+                    contributionStats.added += stats.get("additions").asInt();
+                    contributionStats.deleted += stats.get("deletions").asInt();
+                }
+                
+                if (files != null) {
+                    for (JsonNode file : files) {
+                        contributionStats.files.add(file.get("filename").asText());
                     }
                 }
             }
-        } finally {
-            // Ensure proper cleanup
-            if (git != null) {
-                git.close();
-            }
-            deleteDirectory(localPath.toFile());
         }
     }
     
-    private void analyzeSvnRepository(RepositoryConfig config, ReportData report) {
-        // SVN analysis would require SVNKit library
-        // This is a placeholder implementation
-        report.success = false;
-        report.errorMessage = "SVN support requires SVNKit library implementation";
-    }
-    
-    private int[] calculateChanges(Repository repository, RevCommit commit) throws IOException {
-        int added = 0;
-        int deleted = 0;
+    private void analyzeGitLabRepository(RepositoryConfig config, ReportData report) 
+            throws IOException, InterruptedException {
         
-        try (DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
-             ObjectReader reader = repository.newObjectReader();
-             RevWalk revWalk = new RevWalk(repository)) {
+        String today = LocalDate.now().toString();
+        String projectId = config.owner + "%2F" + config.repo; // URL encode the project path
+        String apiUrl = String.format("https://gitlab.com/api/v4/projects/%s/repository/commits", projectId);
+        
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(apiUrl + "?since=" + today + "T00:00:00Z&until=" + today + "T23:59:59Z"))
+                .timeout(Duration.ofSeconds(30))
+                .header("User-Agent", "DailyReportGenerator");
+        
+        if (config.token != null) {
+            requestBuilder.header("PRIVATE-TOKEN", config.token);
+        }
+        
+        HttpRequest request = requestBuilder.build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new IOException("GitLab API error: " + response.statusCode() + " - " + response.body());
+        }
+        
+        JsonNode commits = objectMapper.readTree(response.body());
+        
+        for (JsonNode commit : commits) {
+            String author = commit.get("author_name").asText();
+            String sha = commit.get("id").asText();
             
-            diffFormatter.setRepository(repository);
-            diffFormatter.setDiffComparator(RawTextComparator.DEFAULT);
-            diffFormatter.setDetectRenames(true);
+            // Get commit diff stats
+            String commitUrl = String.format("https://gitlab.com/api/v4/projects/%s/repository/commits/%s", 
+                                           projectId, sha);
             
-            RevCommit parent = null;
-            if (commit.getParentCount() > 0) {
-                ObjectId parentId = commit.getParent(0).getId();
-                parent = revWalk.parseCommit(parentId);
-            }
+            HttpRequest commitRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(commitUrl))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("User-Agent", "DailyReportGenerator")
+                    .header("PRIVATE-TOKEN", config.token != null ? config.token : "")
+                    .build();
             
-            List<DiffEntry> diffs;
-            if (parent == null) {
-                CanonicalTreeParser newTreeIter = new CanonicalTreeParser();
-                newTreeIter.reset(reader, commit.getTree());
-                diffs = diffFormatter.scan(new CanonicalTreeParser(), newTreeIter);
-            } else {
-                CanonicalTreeParser oldTreeIter = new CanonicalTreeParser();
-                oldTreeIter.reset(reader, parent.getTree());
-                CanonicalTreeParser newTreeIter = new CanonicalTreeParser();
-                newTreeIter.reset(reader, commit.getTree());
-                diffs = diffFormatter.scan(oldTreeIter, newTreeIter);
-            }
+            HttpResponse<String> commitResponse = httpClient.send(commitRequest, HttpResponse.BodyHandlers.ofString());
             
-            for (DiffEntry diff : diffs) {
-                FileHeader fileHeader = diffFormatter.toFileHeader(diff);
-                EditList editList = fileHeader.toEditList();
+            if (commitResponse.statusCode() == 200) {
+                JsonNode commitData = objectMapper.readTree(commitResponse.body());
+                JsonNode stats = commitData.get("stats");
                 
-                for (int i = 0; i < editList.size(); i++) {
-                    added += editList.get(i).getEndB() - editList.get(i).getBeginB();
-                    deleted += editList.get(i).getEndA() - editList.get(i).getBeginA();
+                ContributionStats contributionStats = report.contributions.computeIfAbsent(author, k -> new ContributionStats());
+                contributionStats.commits++;
+                
+                if (stats != null) {
+                    contributionStats.added += stats.get("additions").asInt();
+                    contributionStats.deleted += stats.get("deletions").asInt();
+                }
+                
+                // Get modified files from diff
+                String diffUrl = commitUrl + "/diff";
+                HttpRequest diffRequest = HttpRequest.newBuilder()
+                        .uri(URI.create(diffUrl))
+                        .timeout(Duration.ofSeconds(30))
+                        .header("User-Agent", "DailyReportGenerator")
+                        .header("PRIVATE-TOKEN", config.token != null ? config.token : "")
+                        .build();
+                
+                HttpResponse<String> diffResponse = httpClient.send(diffRequest, HttpResponse.BodyHandlers.ofString());
+                if (diffResponse.statusCode() == 200) {
+                    JsonNode diffs = objectMapper.readTree(diffResponse.body());
+                    for (JsonNode diff : diffs) {
+                        contributionStats.files.add(diff.get("new_path").asText());
+                    }
                 }
             }
         }
-        
-        return new int[]{added, deleted};
     }
     
-    private Set<String> getModifiedFiles(Repository repository, RevCommit commit) throws IOException {
-        Set<String> files = new HashSet<>();
+    private void analyzeBitbucketRepository(RepositoryConfig config, ReportData report) 
+            throws IOException, InterruptedException {
         
-        try (DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
-             ObjectReader reader = repository.newObjectReader();
-             RevWalk revWalk = new RevWalk(repository)) {
-            
-            diffFormatter.setRepository(repository);
-            
-            RevCommit parent = null;
-            if (commit.getParentCount() > 0) {
-                ObjectId parentId = commit.getParent(0).getId();
-                parent = revWalk.parseCommit(parentId);
-            }
-            
-            List<DiffEntry> diffs;
-            if (parent == null) {
-                CanonicalTreeParser newTreeIter = new CanonicalTreeParser();
-                newTreeIter.reset(reader, commit.getTree());
-                diffs = diffFormatter.scan(new CanonicalTreeParser(), newTreeIter);
-            } else {
-                CanonicalTreeParser oldTreeIter = new CanonicalTreeParser();
-                oldTreeIter.reset(reader, parent.getTree());
-                CanonicalTreeParser newTreeIter = new CanonicalTreeParser();
-                newTreeIter.reset(reader, commit.getTree());
-                diffs = diffFormatter.scan(oldTreeIter, newTreeIter);
-            }
-            
-            for (DiffEntry diff : diffs) {
-                files.add(diff.getNewPath());
-            }
+        // Bitbucket API v2.0
+        String apiUrl = String.format("https://api.bitbucket.org/2.0/repositories/%s/%s/commits", 
+                                    config.owner, config.repo);
+        
+        String credentials = config.owner + ":" + config.token;
+        String encodedCredentials = Base64.getEncoder().encodeToString(credentials.getBytes());
+        
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(apiUrl))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", "Basic " + encodedCredentials)
+                .header("User-Agent", "DailyReportGenerator")
+                .build();
+        
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new IOException("Bitbucket API error: " + response.statusCode() + " - " + response.body());
         }
         
-        return files;
+        JsonNode data = objectMapper.readTree(response.body());
+        JsonNode commits = data.get("values");
+        
+        String today = LocalDate.now().toString();
+        
+        for (JsonNode commit : commits) {
+            String commitDate = commit.get("date").asText().substring(0, 10); // Extract date part
+            
+            if (commitDate.equals(today)) {
+                String author = commit.get("author").get("user").get("display_name").asText();
+                String hash = commit.get("hash").asText();
+                
+                // Get commit diff stats
+                String diffUrl = String.format("https://api.bitbucket.org/2.0/repositories/%s/%s/diffstat/%s", 
+                                             config.owner, config.repo, hash);
+                
+                HttpRequest diffRequest = HttpRequest.newBuilder()
+                        .uri(URI.create(diffUrl))
+                        .timeout(Duration.ofSeconds(30))
+                        .header("Authorization", "Basic " + encodedCredentials)
+                        .header("User-Agent", "DailyReportGenerator")
+                        .build();
+                
+                HttpResponse<String> diffResponse = httpClient.send(diffRequest, HttpResponse.BodyHandlers.ofString());
+                
+                ContributionStats contributionStats = report.contributions.computeIfAbsent(author, k -> new ContributionStats());
+                contributionStats.commits++;
+                
+                if (diffResponse.statusCode() == 200) {
+                    JsonNode diffData = objectMapper.readTree(diffResponse.body());
+                    JsonNode diffStats = diffData.get("values");
+                    
+                    for (JsonNode fileStat : diffStats) {
+                        contributionStats.added += fileStat.get("lines_added").asInt();
+                        contributionStats.deleted += fileStat.get("lines_removed").asInt();
+                        contributionStats.files.add(fileStat.get("new").get("path").asText());
+                    }
+                }
+            }
+        }
     }
     
     public void saveReports(List<ReportData> reports) throws IOException {
@@ -426,7 +475,7 @@ public class DailyReportGenerator {
             .append(".error{color:red;}")
             .append(".success{color:green;}")
             .append("</style></head><body>")
-            .append("<h1>Daily Code Contribution Report</h1>")
+            .append("<h1>Daily Code Contribution Report (API-Based)</h1>")
             .append("<h2>").append(date).append("</h2>");
         
         // Summary
@@ -512,7 +561,7 @@ public class DailyReportGenerator {
     
     public void printSummary(List<ReportData> reports) {
         System.out.println("\n" + "=".repeat(60));
-        System.out.println("DAILY CODE CONTRIBUTION REPORT");
+        System.out.println("DAILY CODE CONTRIBUTION REPORT (API-BASED)");
         System.out.println(LocalDate.now().format(DateTimeFormatter.ofPattern("MMMM dd, yyyy")));
         System.out.println("=".repeat(60));
         
@@ -552,21 +601,5 @@ public class DailyReportGenerator {
         System.out.println("📈 TOTAL: " + totalCommits + " commits, +" + totalAdded + 
                           "/-" + totalDeleted + " lines (net: " + (totalAdded - totalDeleted) + ")");
         System.out.println("=".repeat(60));
-    }
-    
-    private static void deleteDirectory(File directory) throws IOException {
-        if (directory.exists()) {
-            File[] files = directory.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    if (file.isDirectory()) {
-                        deleteDirectory(file);
-                    } else {
-                        file.delete();
-                    }
-                }
-            }
-            directory.delete();
-        }
     }
 }
