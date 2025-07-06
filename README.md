@@ -205,7 +205,7 @@ This will create a `repositories.json` file with sample configuration:
 #### BitBucket
 1. Go to Bitbucket Settings → App passwords
 2. Create an app password with `Repositories: Read` permission
-3. Use your Bitbucket username and the app password
+3. Use your Bitbucket username and the app password.
 
 ## Usage
 
