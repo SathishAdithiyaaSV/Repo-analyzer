@@ -1,0 +1,13 @@
+[ {
+  "repositoryName" : "MyProject",
+  "repositoryUrl" : "https://github.com/SathishAdithiyaaSV/HOL-3",
+  "repositoryType" : "GITHUB",
+  "reportDate" : "2025-07-06",
+  "contributions" : { },
+  "analyzedBranches" : [ ],
+  "success" : false,
+  "errorMessage" : "GitHub API error getting branches: 404",
+  "totalCommits" : 0,
+  "totalLinesAdded" : 0,
+  "totalLinesDeleted" : 0
+} ]

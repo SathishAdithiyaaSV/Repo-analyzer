@@ -1,0 +1,22 @@
+[ {
+  "repositoryName" : "Repo-analyzer",
+  "repositoryUrl" : "https://github.com/SathishAdithiyaaSV/Repo-analyzer",
+  "repositoryType" : "GITHUB",
+  "reportDate" : "2025-07-07",
+  "contributions" : {
+    "SathishAdithiyaaSV" : {
+      "added" : 1,
+      "deleted" : 1,
+      "commits" : 1,
+      "files" : [ "README.md" ],
+      "branches" : [ "test" ],
+      "netChange" : 0
+    }
+  },
+  "analyzedBranches" : [ "test", "main" ],
+  "success" : true,
+  "errorMessage" : null,
+  "totalCommits" : 1,
+  "totalLinesAdded" : 1,
+  "totalLinesDeleted" : 1
+} ]
